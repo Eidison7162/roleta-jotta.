@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Roleta – Aniversário da Jotta</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  :root{ --gold:#ffd166; }
+  *{ box-sizing:border-box }
+  body{
+    margin:0; min-height:100vh;
+    display:flex; align-items:center; justify-content:center;
+    position:relative; /* necessário pro ::before */
+    font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    color:#e9eefc; padding:20px;
+  }
+  /* Papel de parede garantido em tela cheia */
+  body::before{
+    content:"";
+    position:fixed; inset:0;
+    background: url('fundo.jpg') center center / cover no-repeat;
+    z-index:-1; pointer-events:none;
+    /* opcional: leve escurecida pro conteúdo ficar legível */
+    box-shadow: inset 0 0 0 100vmax rgba(0,0,0,0.25);
+  }
+
+  .card{
+    width:min(760px, 96vw);
+    background: rgba(0,0,0,0.35); /* translúcido p/ ver o fundo por baixo */
+    border-radius:18px; padding:18px;
+    display:grid; gap:12px; place-items:center;
+    box-shadow: 0 18px 40px rgba(0,0,0,0.6);
+  }
+
+  .pointer-top{
+    width:0; height:0;
+    border-left:28px solid transparent;
+    border-right:28px solid transparent;
+    border-top:40px solid var(--gold);
+    filter: drop-shadow(0 6px 10px rgba(0,0,0,0.55));
+    margin-bottom:-12px; z-index:4;
+  }
+
+  .wheel-wrap{ position: relative; display:flex; align-items:center; justify-content:center; }
+  canvas{
+    width:min(600px, 90vw); height:auto; aspect-ratio:1/1;
+    display:block; border-radius:50%; background:transparent;
+    filter: drop-shadow(0 12px 30px rgba(0,0,0,0.6));
+  }
+
+  .controls { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; margin-top:6px; }
+  button{
+    appearance:none; border:0; padding:12px 16px; border-radius:12px; cursor:pointer; font-weight:800;
+    background: linear-gradient(180deg,#4a6bff,#2c4bd6); color:white; letter-spacing:.4px;
+    box-shadow: 0 10px 22px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);
+  }
+  button[disabled]{opacity:.6; cursor:not-allowed; filter:grayscale(.25)}
+
+  .msg{ text-align:center; font-family: "Press Start 2P", monospace; margin-top:6px; }
+  .msg .lead{
+    font-size: clamp(14px, 3.2vw, 22px);
+    background: conic-gradient(#ff4d6d,#ffd166,#06d6a0,#4cc9f0,#b5179e);
+    -webkit-background-clip: text; background-clip:text; color:transparent;
+  }
+  .msg .result{
+    display:inline-block; margin-top:10px; padding:.4rem .8rem; border-radius:10px;
+    font-size: clamp(16px, 3.6vw, 26px);
+    background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.05));
+    box-shadow: inset 0 0 0 2px rgba(255,255,255,0.03); color:#fff;
+  }
+
+  .oval{
+    position:absolute; width:102%; height:102%; border-radius:50%;
+    pointer-events:none; top:-1%; left:-1%;
+    box-shadow: inset 0 0 0 6px rgba(255,255,255,0.02), 0 6px 18px rgba(0,0,0,0.45);
+  }
+
+  @media (max-width:420px){
+    .pointer-top{ border-left:20px solid transparent; border-right:20px solid transparent; border-top:28px solid var(--gold); margin-bottom:-10px; }
+  }
+</style>
+</head>
+<body>
+  <!-- Áudio no DOM, pré-carregado e em loop -->
+  <audio id="bgm" src="musica.mp3" preload="auto" loop playsinline></audio>
+
+  <div class="card" role="application" aria-label="Roleta do Aniversário">
+    <div class="pointer-top" aria-hidden="true"></div>
+    <div class="wheel-wrap">
+      <canvas id="wheel" width="800" height="800" aria-label="Roleta"></canvas>
+      <div class="oval" aria-hidden="true"></div>
+    </div>
+
+    <div class="controls">
+      <button id="spinBtn">Girar 20s</button>
+      <button id="resetBtn">Reset</button>
+    </div>
+
+    <div class="msg" id="message" aria-live="polite"></div>
+  </div>
+
+<script>
+(() => {
+  // ====== Configurações ======
+  const options = ["Hamburgueria","Outback","Forneria","Tapioca"];
+  const colors  = ["#ff595e","#ffca3a","#8ac926","#1982c4"];
+  const totalDuration = 20000; // ms
+  const accelPhase    = 10000; // ms
+  const omega0        = 4.0;   // rad/s
+
+  // ====== DOM ======
+  const canvas  = document.getElementById("wheel");
+  const ctx     = canvas.getContext("2d");
+  const spinBtn = document.getElementById("spinBtn");
+  const resetBtn= document.getElementById("resetBtn");
+  const message = document.getElementById("message");
+  const bgm     = document.getElementById("bgm");
+
+  // ====== Geometria ======
+  const W = canvas.width, H = canvas.height;
+  const cx = W/2, cy = H/2;
+  const outerR = Math.min(W,H)*0.47;
+  const innerR = outerR*0.22;
+  const n = options.length;
+  const segAngle = (Math.PI*2)/n;
+
+  // ====== Estado ======
+  let angle = 0;
+  let spinning = false;
+  let startTime = 0, lastTime = 0, rafId = 0;
+
+  // ====== Desenho ======
+  function drawWheel() {
+    ctx.clearRect(0,0,W,H);
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+
+    for (let i = 0; i < n; i++) {
+      const a0 = i*segAngle;
+      const a1 = (i+1)*segAngle;
+
+      ctx.beginPath();
+      ctx.moveTo(0,0);
+      ctx.arc(0,0, outerR, a0, a1);
+      ctx.closePath();
+      ctx.fillStyle = colors[i % colors.length];
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(255,255,255,0.22)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.save();
+      const mid = a0 + segAngle/2;
+      ctx.rotate(mid);
+      ctx.translate(outerR*0.72, 0);
+      ctx.rotate(Math.PI/2);
+      ctx.font = `${outerR*0.09}px "Press Start 2P", monospace`;
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      drawWrappedText(ctx, options[i], 140);
+      ctx.restore();
+    }
+
+    const grad = ctx.createRadialGradient(0,0, innerR*0.15, 0,0, innerR);
+    grad.addColorStop(0, "#0b1022");
+    grad.addColorStop(1, "#15224b");
+    ctx.beginPath();
+    ctx.arc(0,0, innerR, 0, Math.PI*2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    ctx.arc(0,0, outerR*1.005, 0, Math.PI*2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawWrappedText(ctx, text, maxWidth) {
+    const words = text.split(' ');
+    if (words.length === 1) { ctx.fillText(text, 0, 0); return; }
+    const lines = [];
+    let line = words[0];
+    for (let i = 1; i < words.length; i++) {
+      const testLine = line + ' ' + words[i];
+      if (ctx.measureText(testLine).width < maxWidth) line = testLine;
+      else { lines.push(line); line = words[i]; }
+    }
+    lines.push(line);
+    const lineHeight = innerR * 0.45;
+    const startY = -((lines.length - 1)/2) * lineHeight;
+    lines.forEach((ln, idx) => ctx.fillText(ln, 0, startY + idx*lineHeight));
+  }
+
+  // ====== Spin ======
+  function spin() {
+    if (spinning) return;
+    spinning = true;
+    message.innerHTML = '';
+    spinBtn.disabled = true;
+    resetBtn.disabled = true;
+
+    startTime = performance.now();
+    lastTime = startTime;
+
+    const animate = (now) => {
+      const dt = (now - lastTime)/1000;
+      const elapsed = now - startTime;
+
+      let omega = 0;
+      if (elapsed < accelPhase) {
+        omega = omega0;
+      } else if (elapsed < totalDuration) {
+        const t = elapsed - accelPhase;
+        const k = Math.max(0, 1 - t/(totalDuration - accelPhase));
+        omega = omega0 * k;
+      } else {
+        omega = 0;
+      }
+
+      angle = (angle + omega * dt) % (Math.PI*2);
+      drawWheel();
+
+      if (elapsed < totalDuration) {
+        lastTime = now;
+        rafId = requestAnimationFrame(animate);
+      } else {
+        cancelAnimationFrame(rafId);
+        spinning = false;
+        spinBtn.disabled = false;
+        resetBtn.disabled = false;
+        // para a música quando o giro termina
+        bgm.pause();
+        showResult();
+      }
+    };
+
+    rafId = requestAnimationFrame(animate);
+  }
+
+  function showResult() {
+    const pointerAngle = -Math.PI/2;
+    let a = (pointerAngle - angle) % (Math.PI*2);
+    if (a < 0) a += Math.PI*2;
+    const idx = Math.floor(a / segAngle) % n;
+    const result = options[idx];
+
+    message.innerHTML = `<div class="lead">O aniversário da Jotta será...</div>
+                         <div class="result">${escapeHtml(result)}</div>`;
+  }
+
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  // ====== Controles ======
+  resetBtn.addEventListener('click', () => {
+    if (spinning) return;
+    angle = 0;
+    message.innerHTML = '';
+    // garante áudio parado e do início
+    bgm.pause();
+    bgm.currentTime = 0;
+    drawWheel();
+  });
+
+  // IMPORTANTE: tocar o áudio NA MESMA pilha do clique antes de iniciar o spin
+  spinBtn.addEventListener('click', async () => {
+    try {
+      bgm.currentTime = 0;
+      await bgm.play(); // gesto do usuário -> permitido
+    } catch(e) {
+      // Se falhar (ex.: política do navegador), seguimos o jogo sem som
+      console.warn('Não foi possível tocar o áudio:', e);
+    }
+    spin();
+  });
+
+  // Primeira renderização
+  drawWheel();
+})();
+</script>
+</body>
+</html>
